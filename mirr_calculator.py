@@ -13,7 +13,7 @@ Formula:
     MIRR = (FV_positive / PV_negative)^(1/(n-1)) - 1
 
 Usage:
-    python mirr_calculator.py -300 23 44 24 67 88 44 33 77 88 -43 77 99 66 -f 7.5 -r 0.75 --all
+    python mirr_calculator.py -300 23 44 24 67 88 44 33 77 88 -f 7.5% -r 0.75% --all
     python mirr_calculator.py -300 23 44 24 67 88 44 33 77 88 -f 7.5 -r 0.75
     python mirr_calculator.py
 
@@ -27,19 +27,49 @@ Options:
 
 import sys
 import math
+import re
 from typing import List, Optional
 
 
 def parse_rate(value: str, option: str) -> float:
-    """Parse a percentage rate from command line argument."""
+    """Parse a rate from input, accepting both percentage and decimal formats.
+
+    Formats accepted:
+    - "7.5" or "7.5%" -> 0.075 (7.5%)
+    - "0.075" -> 0.075 (7.5%)
+    - "0.75%" -> 0.0075 (0.75%)
+    """
+    value = value.strip()
+    if not value:
+        raise ValueError(f"{option} cannot be empty")
+
+    # Check for percentage sign
+    has_percent = value.endswith("%")
+    if has_percent:
+        value = value[:-1].strip()
+
     try:
         rate = float(value)
         if rate < 0:
             raise ValueError
-        # If value > 1, treat as percentage (e.g., 10 means 10%)
-        return rate / 100.0 if rate > 1 else rate
     except ValueError:
-        raise ValueError(f"{option} must be a number (e.g., 10 for 10%, or 0.10)")
+        raise ValueError(f"{option} must be a number (e.g., 7.5% or 0.075)")
+
+    # If percentage sign was present, convert to decimal
+    if has_percent:
+        return rate / 100.0
+
+    # If value > 1, assume it's a percentage (e.g., 7.5 means 7.5%)
+    # Otherwise assume it's already a decimal (e.g., 0.075)
+    return rate / 100.0 if rate > 1 else rate
+
+
+def parse_cash_flow(value: str) -> float:
+    """Parse a cash flow value from input."""
+    try:
+        return float(value)
+    except ValueError:
+        raise ValueError(f"Invalid cash flow: {value}")
 
 
 def parse_args(args: List[str]) -> dict:
@@ -80,7 +110,7 @@ def parse_args(args: List[str]) -> dict:
         else:
             # Try to parse as a cash flow
             try:
-                cash_flows.append(float(arg))
+                cash_flows.append(parse_cash_flow(arg))
             except ValueError:
                 raise ValueError(f"Invalid argument: {arg}. Must be a number or -f/-r flag")
             i += 1
@@ -257,7 +287,7 @@ def interactive_input() -> dict:
     print("(first value is typically the initial investment)")
     cf_input = input("Cash flows: ")
     try:
-        cash_flows = [float(x.strip()) for x in cf_input.replace(",", " ").split()]
+        cash_flows = [parse_cash_flow(x.strip()) for x in cf_input.replace(",", " ").split()]
         if len(cash_flows) < 2:
             raise ValueError
     except ValueError:
@@ -269,13 +299,13 @@ def interactive_input() -> dict:
     all_metrics = True
 
     print("\nEnter finance rate (discount rate for negative cash flows)")
-    print("(enter as percentage like 7.5, or decimal like 0.075, or press Enter for default 10%)")
+    print("(enter as percentage like 7.5%, or decimal like 0.075, or press Enter for default 10%)")
     finance_input = input("Finance rate (default 10%): ").strip()
     if finance_input:
         finance_rate = parse_rate(finance_input, "Finance rate")
 
     print("\nEnter reinvestment rate (rate for positive cash flows)")
-    print("(enter as percentage like 0.75, or decimal like 0.0075, or press Enter for default 10%)")
+    print("(enter as percentage like 0.75%, or decimal like 0.0075, or press Enter for default 10%)")
     reinvest_input = input("Reinvestment rate (default 10%): ").strip()
     if reinvest_input:
         reinvest_rate = parse_rate(reinvest_input, "Reinvestment rate")
