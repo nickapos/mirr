@@ -285,6 +285,8 @@ def interactive_input() -> dict:
     discount_input = input("Discount rate (default same as finance rate): ").strip()
     if discount_input:
         discount_rate = parse_rate(discount_input, "Discount rate")
+    else:
+        discount_rate = finance_rate
 
     print("\nWhich calculations do you want?")
     print("1. All metrics (MIRR, IRR, NPV, PV, Payback) - default")
