@@ -21,15 +21,14 @@ Formula:
 
 Usage:
     python mirr_calculator.py -300 23 44 24 67 88 44 33 77 88 -f 7.5% -r 0.75% --all
-    python mirr_calculator.py -300 23 44 24 67 88 44 33 77 88 -f 7.5 -r 0.75 --sensitivity
-    python mirr_calculator.py -300 23 44 24 67 88 44 33 77 88 -f 10% --scenario
-    python mirr_calculator.py -300 23 44 24 67 88 44 33 77 88 -f 10% --breakeven
-    python mirr_calculator.py
+    python mirr_calculator.py -i cashflows.csv -f 7.5% -r 0.75% --all
+    python mirr_calculator.py --help
 
 Options:
     -f, --finance-rate   Discount rate for negative cash flows (default: 10%)
     -r, --reinvest-rate  Reinvestment rate for positive cash flows (default: 10%)
     -d, --discount-rate  Discount rate for NPV/PV calculations (default: same as finance rate)
+    -i, --input FILE     Read cash flows from a file (CSV, JSON, or plain text)
     --all                Calculate all metrics
     --sensitivity        Run sensitivity analysis on NPV/MIRR
     --scenario           Run scenario analysis (best/worst/base case)
@@ -40,7 +39,9 @@ Options:
 import sys
 import math
 import re
-from typing import List, Optional, Tuple
+import json
+import csv
+from typing import List, Optional
 
 
 def parse_rate(value: str, option: str) -> float:
@@ -84,19 +85,78 @@ def parse_cash_flow(value: str) -> float:
         raise ValueError(f"Invalid cash flow: {value}")
 
 
+def read_cash_flows_from_file(filename: str) -> List[float]:
+    """Read cash flows from a file (CSV, JSON, or plain text).
+
+    Supports:
+    - CSV: One value per line, or comma-separated values
+    - JSON: Array of numbers, e.g., [-300, 50, 10, 22]
+    - Plain text: One value per line or space/comma-separated
+    """
+    try:
+        with open(filename, 'r') as f:
+            content = f.read().strip()
+    except FileNotFoundError:
+        raise ValueError(f"File not found: {filename}")
+    except Exception as e:
+        raise ValueError(f"Error reading file: {e}")
+
+    if not content:
+        raise ValueError("File is empty")
+
+    # Try JSON first
+    if content.startswith('[') or content.startswith('{'):
+        try:
+            data = json.loads(content)
+            if isinstance(data, list):
+                return [float(x) for x in data]
+            elif isinstance(data, dict) and 'cash_flows' in data:
+                return [float(x) for x in data['cash_flows']]
+            else:
+                raise ValueError("JSON must be an array or object with 'cash_flows' key")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON: {e}")
+
+    # Try CSV format
+    if filename.endswith('.csv'):
+        try:
+            flows = []
+            reader = csv.reader(content.splitlines())
+            for row in reader:
+                for val in row:
+                    val = val.strip()
+                    if val:
+                        flows.append(parse_cash_flow(val))
+            if flows:
+                return flows
+        except Exception:
+            pass  # Fall through to plain text parsing
+
+    # Plain text: try comma-separated first, then space-separated
+    if ',' in content:
+        try:
+            return [parse_cash_flow(x.strip()) for x in content.split(',') if x.strip()]
+        except ValueError:
+            pass
+
+    # Space/newline separated
+    try:
+        return [parse_cash_flow(x.strip()) for x in content.replace('\n', ' ').replace('\t', ' ').split() if x.strip()]
+    except ValueError:
+        raise ValueError(f"Could not parse cash flows from file: {filename}")
+
+
 def parse_args(args: List[str]) -> dict:
-    """
-    Parse command line arguments.
-    Returns dict with cash_flows, finance_rate, reinvest_rate, discount_rate, all.
-    """
+    """Parse command line arguments."""
     finance_rate = 0.10
     reinvest_rate = 0.10
-    discount_rate = None  # Will default to finance_rate
+    discount_rate = None
     cash_flows = []
     all_metrics = False
     sensitivity = False
     scenario = False
     breakeven = False
+    input_file = None
 
     i = 0
     while i < len(args):
@@ -116,6 +176,11 @@ def parse_args(args: List[str]) -> dict:
                 raise ValueError("-d/--discount-rate requires a value")
             discount_rate = parse_rate(args[i + 1], "Discount rate")
             i += 2
+        elif arg in ("-i", "--input"):
+            if i + 1 >= len(args):
+                raise ValueError("-i/--input requires a filename")
+            input_file = args[i + 1]
+            i += 2
         elif arg == "--all":
             all_metrics = True
             i += 1
@@ -132,14 +197,22 @@ def parse_args(args: List[str]) -> dict:
             print(__doc__)
             sys.exit(0)
         else:
-            # Try to parse as a cash flow
-            try:
-                cash_flows.append(parse_cash_flow(arg))
-            except ValueError:
-                raise ValueError(f"Invalid argument: {arg}. Must be a number or -f/-r flag")
-            i += 1
+            # Treat as a cash flow or file path (if starts with @)
+            if arg.startswith('@'):
+                input_file = arg[1:]
+                i += 1
+            else:
+                try:
+                    cash_flows.append(parse_cash_flow(arg))
+                except ValueError:
+                    raise ValueError(f"Invalid argument: {arg}. Must be a number, -f/-r flag, or @filename")
+                i += 1
 
-    # Discount rate defaults to finance rate
+    # If input file specified, read cash flows from file
+    if input_file:
+        file_flows = read_cash_flows_from_file(input_file)
+        cash_flows.extend(file_flows)
+
     if discount_rate is None:
         discount_rate = finance_rate
 
@@ -162,84 +235,64 @@ def npv(cash_flows: List[float], rate: float) -> float:
 
 def calculate_mirr(cash_flows: List[float], finance_rate: float = 0.10,
                    reinvest_rate: float = 0.10) -> float:
-    """Calculate the Modified Internal Rate of Return (MIRR)."""
+    """Calculate MIRR."""
     n = len(cash_flows)
     if n < 2:
-        raise ValueError("Need at least 2 cash flows to calculate MIRR")
+        raise ValueError("Need at least 2 cash flows")
     if finance_rate < 0 or reinvest_rate < 0:
         raise ValueError("Rates must be non-negative")
 
-    # PV of negative cash flows (discounted to period 0)
     pv_negative = sum(abs(cf) / ((1 + finance_rate) ** i)
                       for i, cf in enumerate(cash_flows) if cf < 0)
-
-    # FV of positive cash flows (compounded to final period)
     fv_positive = sum(cf * ((1 + reinvest_rate) ** (n - 1 - i))
                       for i, cf in enumerate(cash_flows) if cf > 0)
-
-    # MIRR formula
-    mirr = (fv_positive / pv_negative) ** (1 / (n - 1)) - 1
-
-    return mirr
+    return (fv_positive / pv_negative) ** (1 / (n - 1)) - 1
 
 
 def calculate_irr(cash_flows: List[float], tolerance: float = 0.0001,
                   max_iter: int = 1000) -> float:
-    """
-    Calculate Internal Rate of Return using Newton's method.
-    IRR is the rate where NPV = 0.
-    """
+    """Calculate IRR using Newton's method with bisection fallback."""
     if len(cash_flows) < 2:
-        raise ValueError("Need at least 2 cash flows to calculate IRR")
+        raise ValueError("Need at least 2 cash flows")
 
     def npv_rate(rate: float) -> float:
         return npv(cash_flows, rate)
 
-    # Initial guess
     rate = 0.10
     for _ in range(max_iter):
         npv_value = npv_rate(rate)
         if abs(npv_value) < tolerance:
             return rate
-
-        # Derivative of NPV with respect to rate
         derivative = sum(-i * cf / ((1 + rate) ** (i + 1))
                          for i, cf in enumerate(cash_flows) if i > 0)
-
         if abs(derivative) < 1e-12:
             break
-
         new_rate = rate - npv_value / derivative
         if not math.isfinite(new_rate) or new_rate < -1:
-            # Newton's method failed; fall back to bisection
             rate = new_rate
             break
-
         rate = new_rate
 
-    # Fallback to bisection method
     low, high = -0.9999, 10.0
     for _ in range(max_iter):
         mid = (low + high) / 2
         npv_value = npv_rate(mid)
-
         if abs(npv_value) < tolerance:
             return mid
         elif npv_value > 0:
             low = mid
         else:
             high = mid
-
     return (low + high) / 2
 
 
 def calculate_pv(cash_flows: List[float], discount_rate: float) -> float:
-    """Calculate Present Value of all cash flows."""
+    """Calculate Present Value."""
     return npv(cash_flows, discount_rate)
 
 
 def calculate_payback_period(cash_flows: List[float]) -> Optional[float]:
-    """Calculate Payback Period (in years) - time to recover initial investment."""
+    """Calculate simple Payback Period."""
     cumulative = 0.0
     for i, cf in enumerate(cash_flows):
         cumulative += cf
@@ -249,12 +302,11 @@ def calculate_payback_period(cash_flows: List[float]) -> Optional[float]:
             prev_cumulative = cumulative - cf
             fraction = (0 - prev_cumulative) / cf if cf != 0 else 0.0
             return (i - 1) + fraction
-
-    return None  # Never pays back
+    return None
 
 
 def calculate_discounted_payback_period(cash_flows: List[float], discount_rate: float) -> Optional[float]:
-    """Calculate Discounted Payback Period (in years) - time to recover initial investment using discounted cash flows."""
+    """Calculate Discounted Payback Period."""
     cumulative = 0.0
     for i, cf in enumerate(cash_flows):
         discounted_cf = cf / ((1 + discount_rate) ** i)
@@ -265,40 +317,25 @@ def calculate_discounted_payback_period(cash_flows: List[float], discount_rate: 
             prev_cumulative = cumulative - discounted_cf
             fraction = (0 - prev_cumulative) / discounted_cf if discounted_cf != 0 else 0.0
             return (i - 1) + fraction
-
-    return None  # Never pays back
+    return None
 
 
 def calculate_profitability_index(cash_flows: List[float], discount_rate: float) -> float:
-    """
-    Calculate Profitability Index (PI) = PV of Future Cash Flows / Initial Investment
-    Also known as Benefit-Cost Ratio
-    """
-    if len(cash_flows) < 2:
-        raise ValueError("Need at least 2 cash flows to calculate PI")
-    
+    """Calculate Profitability Index (PI)."""
     initial_investment = abs(cash_flows[0]) if cash_flows[0] < 0 else 0
     if initial_investment == 0:
-        # If no initial outflow, use the first negative cash flow as investment
         for cf in cash_flows:
             if cf < 0:
                 initial_investment = abs(cf)
                 break
-    
     if initial_investment == 0:
-        return float('inf')  # No investment required
-    
-    # PV of all cash flows except the initial investment
-    pv_future_cflows = npv(cash_flows[1:], discount_rate) if len(cash_flows) > 1 else 0
-    # Add back the initial investment (since NPV includes it as negative)
-    pv_total = npv(cash_flows, discount_rate)
-    pv_future_cflows = pv_total + initial_investment  # Because initial investment is negative in cash_flows[0]
-    
+        return float('inf')
+    pv_future_cflows = npv(cash_flows, discount_rate) + initial_investment
     return pv_future_cflows / initial_investment
 
 
 def calculate_roi(cash_flows: List[float]) -> float:
-    """Calculate Return on Investment (ROI) = (Total Inflows - Initial Investment) / Initial Investment."""
+    """Calculate ROI."""
     initial_investment = abs(cash_flows[0]) if cash_flows[0] < 0 else 0
     if initial_investment == 0:
         for cf in cash_flows:
@@ -312,13 +349,11 @@ def calculate_roi(cash_flows: List[float]) -> float:
 
 
 def calculate_eaa(cash_flows: List[float], discount_rate: float) -> Optional[float]:
-    """Calculate Equivalent Annual Annuity (EAA) for comparing projects of different lifespans."""
+    """Calculate Equivalent Annual Annuity (EAA)."""
     n = len(cash_flows)
     if n < 2:
         return None
     npv_value = npv(cash_flows, discount_rate)
-    # EAA = NPV / Annuity Factor
-    # Annuity Factor = (1 - (1+r)^(-n)) / r
     if discount_rate == 0:
         annuity_factor = n
     else:
@@ -329,7 +364,7 @@ def calculate_eaa(cash_flows: List[float], discount_rate: float) -> Optional[flo
 
 
 def find_break_even_rate(cash_flows: List[float], tolerance: float = 0.0001) -> Optional[float]:
-    """Find the discount rate where NPV = 0 (break-even rate)."""
+    """Find discount rate where NPV = 0."""
     def npv_at_rate(rate: float) -> float:
         return npv(cash_flows, rate)
 
@@ -347,7 +382,7 @@ def find_break_even_rate(cash_flows: List[float], tolerance: float = 0.0001) -> 
 
 
 def run_sensitivity_analysis(cash_flows: List[float], base_discount_rate: float) -> List[dict]:
-    """Run sensitivity analysis showing NPV and MIRR at different discount rates."""
+    """Run sensitivity analysis."""
     results = []
     rates = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.075, 0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14, 0.15]
     for rate in rates:
@@ -358,12 +393,10 @@ def run_sensitivity_analysis(cash_flows: List[float], base_discount_rate: float)
 
 
 def run_scenario_analysis(cash_flows: List[float], discount_rate: float) -> dict:
-    """Run scenario analysis: best case, worst case, base case."""
-    # Base case is the original cash flows
+    """Run scenario analysis."""
     base_npv = npv(cash_flows, discount_rate)
     base_irr = calculate_irr(cash_flows)
 
-    # Best case: scale positive cash flows up by 20%
     best_case = cash_flows.copy()
     for i in range(len(best_case)):
         if best_case[i] > 0:
@@ -371,7 +404,6 @@ def run_scenario_analysis(cash_flows: List[float], discount_rate: float) -> dict
     best_npv = npv(best_case, discount_rate)
     best_irr = calculate_irr(best_case)
 
-    # Worst case: scale positive cash flows down by 20%
     worst_case = cash_flows.copy()
     for i in range(len(worst_case)):
         if worst_case[i] > 0:
@@ -387,7 +419,7 @@ def run_scenario_analysis(cash_flows: List[float], discount_rate: float) -> dict
 
 
 def print_results(data: dict) -> None:
-    """Print the calculation results."""
+    """Print all calculation results."""
     cash_flows = data["cash_flows"]
     finance_rate = data["finance_rate"]
     reinvest_rate = data["reinvest_rate"]
@@ -441,8 +473,8 @@ def print_results(data: dict) -> None:
     else:
         print(f"EAA:       {'N/A':>12}")
 
-    # Break-even rate
-    if breakeven_rate := find_break_even_rate(cash_flows):
+    breakeven_rate = find_break_even_rate(cash_flows)
+    if breakeven_rate is not None:
         print(f"\nBreak-even Discount Rate: {breakeven_rate * 100:.4f}%")
         if discount_rate < breakeven_rate:
             print(f"  → Current discount rate ({discount_rate*100:.2f}%) < breakeven ({breakeven_rate*100:.2f}%) → NPV > 0")
@@ -482,7 +514,6 @@ def print_results(data: dict) -> None:
     print(f"         = ({total_inflows:.4f} - {initial_investment:.4f}) / {initial_investment:.4f}")
     print(f"         = {roi * 100:.4f}%")
 
-    # EAA
     if eaa is not None:
         print("\n--- Equivalent Annual Annuity (EAA) ---")
         print(f"Formula: NPV / Annuity Factor")
@@ -490,7 +521,6 @@ def print_results(data: dict) -> None:
         print(f"         = {npv_value:.4f} / {annuity_factor:.4f}")
         print(f"         = {eaa:.4f} per year")
 
-    # Sensitivity Analysis
     if sensitivity or all_metrics:
         print("\n--- Sensitivity Analysis ---")
         print(f"{'Discount Rate':>14} | {'NPV':>12} | {'MIRR':>10}")
@@ -500,7 +530,6 @@ def print_results(data: dict) -> None:
             rate_pct = r["rate"] * 100
             print(f"{rate_pct:>13.1f}% | {r['npv']:>12.4f} | {r['mirr']*100:>9.4f}%")
 
-    # Scenario Analysis
     if scenario or all_metrics:
         print("\n--- Scenario Analysis ---")
         scen_results = run_scenario_analysis(cash_flows, discount_rate)
@@ -520,18 +549,34 @@ def interactive_input() -> dict:
 
     print("\nEnter cash flows separated by spaces")
     print("(first value is typically the initial investment)")
-    cf_input = input("Cash flows: ")
-    try:
-        cash_flows = [parse_cash_flow(x.strip()) for x in cf_input.replace(",", " ").split()]
-        if len(cash_flows) < 2:
-            raise ValueError
-    except ValueError:
-        raise ValueError("Please enter at least 2 numeric cash flows separated by spaces")
+    print("Or enter a filename to read from (e.g., data.csv)")
+    cf_input = input("Cash flows or filename: ").strip()
+
+    # Check if input looks like a filename
+    if cf_input and not cf_input.replace('.', '').replace('-', '').replace(' ', '').isdigit():
+        # Try to read from file
+        try:
+            cash_flows = read_cash_flows_from_file(cf_input)
+            print(f"Loaded {len(cash_flows)} cash flows from {cf_input}")
+        except ValueError as e:
+            # If file read fails, try parsing as cash flows
+            try:
+                cash_flows = [parse_cash_flow(x.strip()) for x in cf_input.replace(',', ' ').split()]
+                if len(cash_flows) < 2:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(f"Could not read file '{cf_input}' and invalid cash flow format")
+    else:
+        try:
+            cash_flows = [parse_cash_flow(x.strip()) for x in cf_input.replace(',', ' ').split()]
+            if len(cash_flows) < 2:
+                raise ValueError
+        except ValueError:
+            raise ValueError("Please enter at least 2 numeric cash flows separated by spaces")
 
     finance_rate = 0.10
     reinvest_rate = 0.10
     discount_rate = None
-    all_metrics = True
 
     print("\nEnter finance rate (discount rate for negative cash flows)")
     print("(enter as percentage like 7.5%, or decimal like 0.075, or press Enter for default 10%)")
@@ -579,8 +624,8 @@ def interactive_input() -> dict:
         "scenario": choice == "13",
         "breakeven": choice == "11",
         "metrics": {
-            "1": all_metrics,
-            "2": all_metrics,
+            "1": True,
+            "2": True,
             "3": "mirr",
             "4": "irr",
             "5": "npv",
@@ -593,7 +638,7 @@ def interactive_input() -> dict:
             "12": "breakeven",
             "13": "sensitivity",
             "14": "scenario",
-        }.get(choice, "mirr") if choice in {"2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"} else all_metrics,
+        }.get(choice, True) if choice in {"2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"} else True,
     }
 
 
@@ -602,14 +647,12 @@ def main() -> None:
     args = sys.argv[1:]
 
     if not args:
-        # No arguments - use interactive mode
         try:
             data = interactive_input()
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
     else:
-        # Parse arguments
         try:
             data = parse_args(args)
         except ValueError as e:
